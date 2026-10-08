@@ -1,0 +1,31 @@
+# Build output
+build/
+out/
+bin/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.cmake.stamp
+
+# IDE
+.vscode/
+.idea/
+*.user
+*.sln
+*.vcxproj*
+compile_commands.json
+
+# Misc
+*.log
+.DS_Store
