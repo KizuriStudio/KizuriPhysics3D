@@ -31,6 +31,8 @@ BodyID BodyManager::CreateBody(const BodySettings& settings) {
     body->mTransform = Transform(settings.rotation, settings.position);
     body->mShape = settings.shape;
     body->mMotionType = settings.motionType;
+    body->mMotionQuality = settings.motionQuality;
+    body->mCCDMotionThreshold = settings.ccdMotionThreshold;
     body->mFriction = settings.friction;
     body->mRestitution = settings.restitution;
     body->mObjectLayer = settings.objectLayer;

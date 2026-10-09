@@ -55,6 +55,10 @@ struct ContactConstraint {
     Real friction = Real(0.5);
     Real restitution = 0;
     bool isSensor = false;
+    /// Whether each body is dynamic. Static/kinematic bodies must not be
+    /// written to, so islands sharing them can be solved in parallel.
+    bool dynamicA = true;
+    bool dynamicB = true;
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +73,8 @@ struct SolverSettings {
     Real maxBiasVelocity = Real(3.0);   // cap on position correction velocity
     Real warmStartFactor = Real(1.0);
     bool useSplitImpulse = true;
+    /// Batch contact points four at a time and solve them with SSE.
+    bool useSIMDSolver = true;
     /// Add a Baumgarte position bias to the velocity solve. Disabled by
     /// default because the separate position (non-linear Gauss-Seidel) pass
     /// already removes penetration; enabling both double-corrects and jitters.
@@ -100,11 +106,30 @@ public:
     /// is the recommended position correction (no energy injection).
     void SolveBias(ArrayView<ContactConstraint> constraints, Real dt);
 
-private:
+    // --- Per-constraint API (used by the island solver) --------------------
+    /// Prepare a single constraint (effective masses, biases, warm start).
+    void PrepareConstraint(ContactConstraint& c, Real dt);
+    /// Apply the warm-start impulses of a single constraint.
     void WarmStart(ContactConstraint& c);
+    /// One velocity iteration on a single constraint.
     void SolveVelocityConstraint(ContactConstraint& c, Real dt);
+    /// One position (non-linear Gauss-Seidel) iteration on a single constraint.
     void SolvePositionConstraint(ContactConstraint& c, Real dt);
+    /// One split-impulse bias iteration on a single constraint.
     void SolveBiasConstraint(ContactConstraint& c, Real dt);
+
+    // --- SIMD (4-wide SoA) -------------------------------------------------
+    /// Identifies one contact point inside a constraint.
+    struct ContactPointRef {
+        ContactConstraint* constraint = nullptr;
+        u32 point = 0;
+    };
+    /// Solve up to four contact points in parallel with SSE. Every body that
+    /// appears in the batch must be distinct so the impulse scatter is
+    /// race-free. Falls back to the scalar path when SSE is unavailable.
+    void SolveVelocityBatchSIMD(const ContactPointRef* refs, u32 count, Real dt);
+
+private:
     void SolveContactVelocity(ContactConstraint& c, ContactPointConstraint& p);
 
     SolverSettings mSettings;

@@ -1,9 +1,9 @@
-# KizuriPhysics — API reference
+# KizuriPhysics — Referência da API
 
-Everything lives in the `kizuri` namespace and is reachable through
+Tudo vive no namespace `kizuri` e é acessível via
 `#include "Kizuri/Kizuri.h"`.
 
-## World
+## Mundo
 
 ```cpp
 class PhysicsWorld {
@@ -14,35 +14,40 @@ public:
     void  SetGravity(const Vec3& g);
     Vec3  GetGravity() const;
 
-    // Bodies
+    // Corpos
     BodyID CreateBody(const BodySettings& settings);
     void   DestroyBody(BodyID id);
+    void   Clear();                                  // remove todo corpo + cache
+    void   SetBodyActive(BodyID id, bool active);    // acorda / adormece um corpo
     Body*  GetBody(BodyID id);
     const Body* GetBody(BodyID id) const;
 
-    // Constraints
+    // Restrições
     void AddConstraint(std::unique_ptr<Constraint> c);
     void RemoveAllConstraints();
     u32  GetNumConstraints() const;
 
-    // Simulation
-    void Step(Real dt);        // honours useFixedTimestep / maxSubSteps
-    void StepFixed(Real dt);   // exactly one step
+    // Simulação
+    void Step(Real dt);        // respeita useFixedTimestep / maxSubSteps
+    void StepFixed(Real dt);   // exatamente um passo
 
-    // Queries
+    // Consultas
     RayCastResult   RayCast(const Ray&, Real maxDist = BIG, u32 mask = ~0u) const;
     u32             RayCastAll(const Ray&, Real maxDist, RayCastResult* out, u32 max,
                                u32 mask = ~0u) const;
     ShapeCastResult CastShape(const Shape&, const Transform& start, const Vec3& dir,
                               Real maxDist, u32 mask = ~0u) const;
+    u32             CastShapeAll(const Shape&, const Transform& start, const Vec3& dir,
+                                 Real maxDist, ShapeCastResult* out, u32 max,
+                                 u32 mask = ~0u) const;
     u32             QueryAABB(const AABB&, BodyID* out, u32 max, u32 mask = ~0u) const;
     BodyID          QueryPoint(const Vec3&, u32 mask = ~0u) const;
 
-    // Introspection
+    // Introspecção
     const WorldStats&   GetStats() const;
     const BroadPhase&   GetBroadPhase() const;
     const BodyManager&  GetBodyManager() const;
-    u64                 ComputeStateHash() const;   // determinism / lockstep
+    u64                 ComputeStateHash() const;   // determinismo / lockstep
 
     void DrawDebug(DebugRenderer&, bool shapes = true,
                    bool contacts = false, bool aabbs = false) const;
@@ -51,33 +56,46 @@ public:
 
 ### WorldSettings
 
-| Field | Default | Meaning |
+| Campo | Padrão | Significado |
 |---|---|---|
-| `gravity` | `(0,-9.81,0)` | Global acceleration. |
-| `solver` | see below | Solver tuning. |
-| `allowSleeping` | `true` | Enable island sleeping. |
-| `sleepTimeThreshold` | `0.5` s | Time below threshold before sleeping. |
-| `sleepLinearThreshold` | `0.05` m/s | Linear sleep speed. |
-| `sleepAngularThreshold` | `0.1` rad/s | Angular sleep speed. |
-| `useFixedTimestep` | `true` | Sub-divide `Step(dt)` into fixed steps. |
-| `fixedTimestep` | `1/60` s | Fixed step length. |
-| `maxSubSteps` | `4` | Spiral-of-death guard. |
-| `useMultithreading` | `true` | Parallel narrow phase. |
+| `gravity` | `(0,-9.81,0)` | Aceleração global. |
+| `solver` | veja abaixo | Ajustes do solver. |
+| `allowSleeping` | `true` | Habilita o sono por ilhas. |
+| `sleepTimeThreshold` | `0.5` s | Tempo abaixo do limite antes de dormir. |
+| `sleepLinearThreshold` | `0.05` m/s | Velocidade linear de sono. |
+| `sleepAngularThreshold` | `0.1` rad/s | Velocidade angular de sono. |
+| `useFixedTimestep` | `true` | Subdivide `Step(dt)` em passos fixos. |
+| `fixedTimestep` | `1/60` s | Duração do passo fixo. |
+| `maxSubSteps` | `4` | Proteção contra espiral da morte. |
+| `useMultithreading` | `true` | Fase estreita paralela. |
 
 ### SolverSettings
 
-| Field | Default | Meaning |
+| Campo | Padrão | Significado |
 |---|---|---|
-| `velocityIterations` | `16` | Impulse iterations. |
-| `positionIterations` | `6` | Split-impulse iterations. |
-| `baumgarte` | `0.2` | Position error correction factor. |
-| `penetrationSlop` | `0.005` m | Allowed penetration. |
-| `restitutionThreshold` | `1.0` m/s | Min approach speed for bounce. |
-| `maxBiasVelocity` | `3.0` | Cap on correction velocity. |
-| `warmStartFactor` | `1.0` | Warm-start scaling. |
-| `useVelocityBias` | `false` | `false` = split impulse (recommended); `true` = Baumgarte in the velocity solve. |
+| `velocityIterations` | `16` | Iterações de impulso. |
+| `positionIterations` | `6` | Iterações de split impulse. |
+| `baumgarte` | `0.2` | Fator de correção do erro de posição. |
+| `penetrationSlop` | `0.005` m | Penetração permitida. |
+| `restitutionThreshold` | `1.0` m/s | Velocidade mínima de aproximação para quicar. |
+| `maxBiasVelocity` | `3.0` | Teto da velocidade de correção. |
+| `warmStartFactor` | `1.0` | Escala do warm start. |
+| `useVelocityBias` | `false` | `false` = split impulse (recomendado); `true` = Baumgarte no solve de velocidade. |
+| `useSIMDSolver` | `true` | Usa os lotes de contato SoA 4-wide. |
 
-## Bodies
+### WorldSettings — CCD
+
+| Campo | Padrão | Significado |
+|---|---|---|
+| `useCCD` | `true` | Habilita a colisão contínua por linear cast. |
+| `ccdMaxPenetration` | `0.01` m | Para a esta distância antes da superfície. |
+
+O CCD por corpo é selecionado com `BodySettings::motionQuality`
+(`MotionQuality::Discrete` ou `MotionQuality::LinearCast`) e ajustado com
+`BodySettings::ccdMotionThreshold` (pula o cast abaixo deste movimento por
+passo).
+
+## Corpos
 
 ```cpp
 BodyID id = world.CreateBody(BodySettings{
@@ -90,21 +108,21 @@ BodyID id = world.CreateBody(BodySettings{
 });
 ```
 
-`Body` exposes `GetPosition/SetPosition`, `GetRotation/SetRotation`,
+`Body` expõe `GetPosition/SetPosition`, `GetRotation/SetRotation`,
 `GetTransform/SetTransform`, `GetLinearVelocity/SetLinearVelocity`,
-`GetAngularVelocity/SetAngularVelocity`, `GetMass`, `GetShape`, friction /
-restitution accessors, `IsDynamic/IsStatic/IsKinematic`, `IsActive`, and
-`ApplyForce` / `ApplyImpulse` style helpers.
+`GetAngularVelocity/SetAngularVelocity`, `GetMass`, `GetShape`, acessores de
+atrito / restituição, `IsDynamic/IsStatic/IsKinematic`, `IsActive`, e helpers no
+estilo `ApplyForce` / `ApplyImpulse`.
 
-`BodyID` packs a 24-bit index and an 8-bit sequence; `Pack()` / `Unpack()` are
-used internally by the broad phase.
+`BodyID` empacota um índice de 24 bits e uma sequência de 8 bits; `Pack()` /
+`Unpack()` são usados internamente pela fase ampla.
 
-## Shapes
+## Formas
 
-All shapes derive from `Shape` (ref-counted, immutable). Create them with
-`MakeRef<T>(...)`:
+Todas as formas derivam de `Shape` (com contagem de referência, imutável).
+Crie-as com `MakeRef<T>(...)`:
 
-| Shape | Construction |
+| Forma | Construção |
 |---|---|
 | `SphereShape` | `MakeRef<SphereShape>(radius)` |
 | `BoxShape` | `MakeRef<BoxShape>(halfExtent)` |
@@ -112,16 +130,16 @@ All shapes derive from `Shape` (ref-counted, immutable). Create them with
 | `CylinderShape` | `MakeRef<CylinderShape>(halfHeight, radius)` |
 | `ConvexHullShape` | `ConvexHullShape::Create(points, count)` |
 | `MeshShape` | `MeshShape::Create(vertices, count, indices, count)` |
-| `CompoundShape` | `MakeRef<CompoundShape>()` then `AddChild(transform, shape)` |
+| `CompoundShape` | `MakeRef<CompoundShape>()` e depois `AddChild(transform, shape)` |
 | `HeightFieldShape` | `HeightFieldShape::Create(heights, nx, nz, scale)` |
 | `PlaneShape` | `MakeRef<PlaneShape>(Plane(normal, distance))` |
 
-Common `Shape` API: `GetType()`, `GetName()`, `GetLocalBounds()`,
+API comum de `Shape`: `GetType()`, `GetName()`, `GetLocalBounds()`,
 `GetWorldBounds(transform)`, `GetVolume()`, `GetMassProperties(density)`,
 `GetSupport(dir)`, `IsConvex()`, `RayCastLocal(ray, maxFraction, outNormal)`,
 `ContainsPoint(point)`.
 
-## Constraints (joints)
+## Restrições (juntas)
 
 ```cpp
 world.AddConstraint(std::make_unique<PointConstraint>(bodyA, bodyB, worldAnchor));
@@ -132,12 +150,12 @@ world.AddConstraint(std::make_unique<SliderConstraint>(bodyA, bodyB, worldAnchor
 world.AddConstraint(std::make_unique<SixDOFConstraint>(bodyA, bodyB, worldAnchor, worldRotation));
 ```
 
-`HingeConstraint` and `SliderConstraint` support `SetLimits(lo, hi)` and
-`SetMotor(targetVelocity, maxTorqueOrForce)`. `SixDOFConstraint` exposes
-`SetLinearLimits(axis, lo, hi)` / `SetAngularLimits(axis, lo, hi)` with
+`HingeConstraint` e `SliderConstraint` suportam `SetLimits(lo, hi)` e
+`SetMotor(targetVelocity, maxTorqueOrForce)`. `SixDOFConstraint` expõe
+`SetLinearLimits(axis, lo, hi)` / `SetAngularLimits(axis, lo, hi)` com
 `axis ∈ {0,1,2}`.
 
-## Queries
+## Consultas
 
 ```cpp
 struct RayCastResult {
@@ -156,13 +174,13 @@ struct ShapeCastResult {
 ```
 
 ```cpp
-Ray ray{ Vec3(0, 10, 0), Vec3(0, -1, 0) };     // origin, direction
+Ray ray{ Vec3(0, 10, 0), Vec3(0, -1, 0) };     // origem, direção
 RayCastResult hit = world.RayCast(ray, 100.0f);
 ```
 
-## Debug rendering
+## Renderização de depuração
 
-Implement `DebugRenderer` and pass it to `world.DrawDebug(...)`:
+Implemente `DebugRenderer` e passe-o a `world.DrawDebug(...)`:
 
 ```cpp
 class DebugRenderer {
@@ -174,8 +192,117 @@ class DebugRenderer {
 };
 ```
 
-## Error handling
+## Controlador de personagem
 
-Invalid inputs are guarded by `KZ_ASSERT`. `BodyID::IsInvalid()` reports a
-failed body creation. Shapes are immutable and ref-counted, so a shape must not
-be mutated after it is attached to a body.
+```cpp
+#include "Kizuri/Kizuri.h"
+
+CharacterSettings cs;
+cs.radius       = 0.3f;
+cs.height       = 1.8f;      // altura total da cápsula (>= 2 * radius)
+cs.maxSlopeAngle = 50.0f;    // graus
+cs.stepHeight   = 0.4f;
+cs.skin         = 0.02f;
+cs.gravity      = Vec3(0, -9.81f, 0);
+
+CharacterController character(world, cs);
+character.SetPosition(Vec3(0, 2, 0));
+character.SetVelocity(Vec3(0, 0, 4));   // intenção horizontal, m/s
+character.Update(1.0f / 60.0f);
+character.Jump(5.0f);                   // apenas quando no chão
+
+bool grounded = character.IsGrounded();
+Vec3 pos      = character.GetPosition();
+Vec3 vel      = character.GetVelocity();
+```
+
+`Update(dt)` executa collide-and-slide contra o mundo, resolve a subida de
+degrau e adere ao chão quando está apoiado. O controlador é cinemático e nunca
+empurra os corpos que toca.
+
+## Veículo
+
+```cpp
+VehicleSettings vs;
+vs.forward     = Vec3(0, 0, 1);
+vs.maxSteerAngle = 0.5f;     // rad
+vs.engineForce = 4000.0f;
+vs.brakeForce  = 2000.0f;
+
+Vehicle vehicle(world, chassisBodyID, vs);
+
+WheelSettings wheel;
+wheel.localPosition          = Vec3(0.8f, -0.3f, 1.2f);  // espaço do chassis
+wheel.radius                 = 0.35f;
+wheel.suspensionRestLength   = 0.35f;
+wheel.suspensionStiffness    = 30000.0f;
+wheel.suspensionDamping      = 2000.0f;
+wheel.maxSuspensionForce     = 100000.0f;
+wheel.friction               = 1.0f;
+wheel.steerable              = true;
+wheel.driven                 = true;
+u32 fl = vehicle.AddWheel(wheel);
+
+vehicle.SetThrottle(1.0f);   // -1..1
+vehicle.SetSteer(0.4f);      // -1..1 (escalado por maxSteerAngle)
+vehicle.SetBrake(0.0f);      // 0..1
+
+// A cada quadro, antes de world.Step():
+vehicle.Update(1.0f / 60.0f);
+world.Step(1.0f / 60.0f);
+
+bool grounded = vehicle.IsWheelGrounded(fl);
+Real compression = vehicle.GetSuspensionCompression(fl);
+Transform wheelT = vehicle.GetWheelTransform(fl);
+```
+
+## Corpos macios
+
+```cpp
+SoftBodySettings ss;
+ss.gravity          = Vec3(0, -9.81f, 0);
+ss.damping          = 0.01f;
+ss.solverIterations = 8;
+
+SoftBody cloth(world, ss);
+cloth.CreateCloth(Vec3(0, 3, 0), /*largura*/ 1.0f, /*altura*/ 1.0f,
+                  /*resX*/ 6, /*resY*/ 6);
+
+SoftBody box(world, ss);
+box.CreateBox(Vec3(0, 3, 0), Vec3(0.5f), /*resolução*/ 3);
+
+// A cada quadro:
+cloth.Update(1.0f / 60.0f);
+box.Update(1.0f / 60.0f);
+
+u32 n = box.GetNumParticles();
+Vec3 p = box.GetParticlePosition(0);
+```
+
+As partículas colidem com o mundo rígido (formas esfera / caixa / plano) via um
+push-out por distância assinada.
+
+## Serialização
+
+```cpp
+#include "Kizuri/Kizuri.h"
+
+// Em memória
+Vector<u8> bytes;
+SerializeWorld(world, bytes);
+DeserializeWorld(world, bytes.Data(), bytes.Size());
+
+// Para / de um arquivo
+SaveWorldToFile(world, "scene.kzp");
+LoadWorldFromFile(world, "scene.kzp");
+```
+
+O fluxo é versionado (magic `KZP1`). Cada corpo é reconstruído via `CreateBody`,
+então os IDs **não** são preservados — resolva referências externas pela ordem
+dos slots após carregar.
+
+## Tratamento de erros
+
+Entradas inválidas são protegidas por `KZ_ASSERT`. `BodyID::IsInvalid()` reporta
+uma criação de corpo que falhou. As formas são imutáveis e com contagem de
+referência, então uma forma não deve ser mutada depois de anexada a um corpo.

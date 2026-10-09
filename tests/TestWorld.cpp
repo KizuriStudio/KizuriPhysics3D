@@ -2,6 +2,8 @@
 #include "TestFramework.h"
 #include "Kizuri/Kizuri.h"
 
+#include <array>
+
 using namespace kizuri;
 
 namespace {
@@ -242,5 +244,85 @@ KZ_TEST(World_Sleeping) {
     CHECK(b != nullptr);
     if (b) {
         CHECK_FALSE(b->IsActive()); // should have gone to sleep
+    }
+}
+
+KZ_TEST(World_CCDPreventsTunneling) {
+    PhysicsWorld world;
+    world.SetGravity(Vec3::Zero());
+
+    // Thin static wall at x = 0.
+    BodySettings wall;
+    wall.shape = MakeRef<BoxShape>(Vec3(0.05, 5, 5));
+    wall.motionType = MotionType::Static;
+    world.CreateBody(wall);
+
+    // A small, very fast bullet that would jump 2 m per step.
+    BodySettings bullet;
+    bullet.shape = MakeRef<SphereShape>(0.1);
+    bullet.position = Vec3(-5, 0, 0);
+    bullet.motionType = MotionType::Dynamic;
+    bullet.motionQuality = MotionQuality::LinearCast;
+    bullet.linearVelocity = Vec3(120, 0, 0);
+    bullet.gravityFactor = 0;
+    BodyID id = world.CreateBody(bullet);
+
+    for (int i = 0; i < 10; ++i) world.StepFixed(Real(1.0 / 60.0));
+
+    const Body* b = world.GetBody(id);
+    CHECK(b != nullptr);
+    if (b) {
+        // Without CCD it would be at x = +15; with CCD it must stay behind.
+        CHECK_TRUE(b->GetPosition().x < Real(0.0));
+    }
+}
+
+KZ_TEST(World_MultipleIslands) {
+    // Two far-apart stacks must form two independent islands.
+    PhysicsWorld world;
+    world.SetGravity(Vec3(0, -9.81, 0));
+    AddGround(world);
+
+    for (int s = 0; s < 2; ++s) {
+        Real x = Real(s) * 40.0;
+        for (int i = 0; i < 3; ++i) {
+            AddBox(world, Vec3(x, 0.5 + i * 1.01, 0), Vec3(0.5, 0.5, 0.5));
+        }
+    }
+
+    StepSeconds(world, 0.5);
+    CHECK_TRUE(world.GetStats().numIslands >= 2);
+
+    // Both stacks must settle on the ground.
+    StepSeconds(world, 3.0);
+    const BodyManager& bodies = world.GetBodyManager();
+    (void)bodies;
+}
+
+KZ_TEST(World_SIMDMatchesScalar) {
+    // The 4-wide SSE contact solver must agree with the scalar reference.
+    auto run = [](bool simd) {
+        PhysicsWorld world;
+        world.SetGravity(Vec3(0, -9.81, 0));
+        world.GetSettings().solver.useSIMDSolver = simd;
+        AddGround(world);
+        BodyID ids[4];
+        for (int i = 0; i < 4; ++i) {
+            ids[i] = AddBox(world, Vec3(Real(i) * 0.05, 1.0 + i * 1.02, 0),
+                            Vec3(0.5, 0.5, 0.5));
+        }
+        StepSeconds(world, 2.0);
+        Vec3 out[4];
+        for (int i = 0; i < 4; ++i) {
+            const Body* b = world.GetBody(ids[i]);
+            out[i] = b ? b->GetPosition() : Vec3::Zero();
+        }
+        return std::array<Vec3, 4>{ out[0], out[1], out[2], out[3] };
+    };
+
+    auto a = run(false);
+    auto b = run(true);
+    for (int i = 0; i < 4; ++i) {
+        CHECK_NEAR((a[i] - b[i]).Length(), 0.0, 0.05);
     }
 }

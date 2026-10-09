@@ -4,7 +4,8 @@ add_executable(kizuri_tests
     TestMath.cpp
     TestShapes.cpp
     TestCollision.cpp
-    TestWorld.cpp)
+    TestWorld.cpp
+    TestFeatures.cpp)
 
 target_link_libraries(kizuri_tests PRIVATE Kizuri::Physics)
 target_include_directories(kizuri_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

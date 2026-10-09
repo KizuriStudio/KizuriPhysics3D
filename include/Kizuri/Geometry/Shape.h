@@ -522,6 +522,17 @@ public:
         return mPlane.normal * mPlane.distance + direction * Real(1.0e6);
     }
     Real GetSignedDistance(const Vec3& point) const override { return mPlane.SignedDistance(point); }
+    Real RayCastLocal(const Ray& ray, Real maxFraction, Vec3& outNormal) const override {
+        Real denom = mPlane.normal.Dot(ray.direction);
+        if (math::Abs(denom) < math::kEpsilon) return maxFraction;
+        Real t = (mPlane.distance - mPlane.normal.Dot(ray.origin)) / denom;
+        if (t < Real(0) || t > maxFraction) return maxFraction;
+        outNormal = mPlane.normal;
+        return t;
+    }
+    bool ContainsPoint(const Vec3& point) const override {
+        return mPlane.SignedDistance(point) <= Real(0);
+    }
 
     const Plane& GetPlane() const { return mPlane; }
     void SetPlane(const Plane& p) { mPlane = p; }

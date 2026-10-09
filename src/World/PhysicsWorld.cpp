@@ -62,11 +62,17 @@ struct UnionFind {
 // Lifetime
 // ===========================================================================
 PhysicsWorld::PhysicsWorld() {
+    // Bring up the shared job system on first use so the parallel narrow phase
+    // and island solver are actually exercised. Safe to call repeatedly.
+    if (!JobSystem::IsInitialized()) {
+        JobSystem::Init();
+    }
     mCacheCapacity = 1024;
     mCache.Resize(mCacheCapacity);
     mManifolds.Reserve(1024);
     mManifoldKeys.Reserve(1024);
     mContactConstraints.Reserve(1024);
+    mIslands.Reserve(64);
 }
 
 PhysicsWorld::~PhysicsWorld() = default;
@@ -84,6 +90,25 @@ BodyID PhysicsWorld::CreateBody(const BodySettings& settings) {
                                                       body->GetObjectLayer(), body->GetCollisionMask());
     body->SetBroadPhaseProxy(proxy);
     return id;
+}
+
+void PhysicsWorld::Clear() {
+    const u32 slots = mBodies.GetBodySlotCount();
+    for (u32 i = 0; i < slots; ++i) {
+        const Body* b = mBodies.GetBodyBySlot(i);
+        if (b) mBodies.DestroyBody(b->GetID());
+    }
+    mConstraints.clear();
+    mContactConstraints.Clear();
+    mManifolds.Clear();
+    mManifoldKeys.Clear();
+    mIslands.Clear();
+    for (u32 i = 0; i < u32(mCache.Size()); ++i) mCache[i].numPoints = 0;
+}
+
+void PhysicsWorld::SetBodyActive(BodyID id, bool active) {
+    if (active) mBodies.ActivateBody(id);
+    else mBodies.DeactivateBody(id);
 }
 
 void PhysicsWorld::DestroyBody(BodyID id) {
@@ -264,10 +289,19 @@ void PhysicsWorld::StepFixed(Real dt) {
     }
     UpdateBodyInertias();
 
-    // 7. Joint position correction.
-    for (u32 iter = 0; iter < mSettings.solver.positionIterations; ++iter) {
-        for (auto& c : mConstraints) {
-            if (c->IsEnabled()) c->SolvePosition(dt);
+    // 7. Joint position correction (per island, parallelisable).
+    {
+        const u32 numIslands = u32(mIslands.Size());
+        if (mSettings.useMultithreading && JobSystem::IsInitialized() && numIslands > 1) {
+            struct Context { PhysicsWorld* world; Real dt; };
+            Context ctx{ this, dt };
+            JobSystem::Get().ParallelFor(0, numIslands, 1,
+                [](void* data, u32 index) {
+                    Context* c = static_cast<Context*>(data);
+                    c->world->SolveIslandPositions(index, c->dt);
+                }, &ctx);
+        } else {
+            for (u32 i = 0; i < numIslands; ++i) SolveIslandPositions(i, dt);
         }
     }
 
@@ -436,6 +470,25 @@ void PhysicsWorld::BuildContactConstraints() {
             Body* t = bodyA; bodyA = bodyB; bodyB = t;
         }
 
+        // Wake a sleeping dynamic body that is touched by a moving one.
+        {
+            auto moving = [](const Body* b) {
+                if (!b) return false;
+                if (b->IsDynamic()) return b->IsActive();
+                if (b->IsKinematic()) {
+                    return b->GetLinearVelocity().LengthSq() > Real(0) ||
+                           b->GetAngularVelocity().LengthSq() > Real(0);
+                }
+                return false;
+            };
+            if (bodyA->IsDynamic() && !bodyA->IsActive() && moving(bodyB)) {
+                mBodies.ActivateBody(bodyA->GetID());
+            }
+            if (bodyB->IsDynamic() && !bodyB->IsActive() && moving(bodyA)) {
+                mBodies.ActivateBody(bodyB->GetID());
+            }
+        }
+
         CachedManifold* cached = FindCached(key);
         if (std::getenv("KZ_NOWS") != nullptr) cached = nullptr;
 
@@ -488,17 +541,28 @@ void PhysicsWorld::SolveContacts(Real dt) {
     ArrayView<ContactConstraint> constraints(mContactConstraints.Data(), mContactConstraints.Size());
 
     mSolver.SetSettings(mSettings.solver);
+
+    // 1. Prepare contacts (effective masses, biases, warm-start clamping) and
+    //    joints. Both are independent per constraint, so no ordering matters.
     mSolver.Prepare(constraints, dt);
-    mSolver.SolveVelocity(constraints, dt);
-
-    // Split-impulse position correction (pseudo velocities, no energy gain).
-    if (!mSettings.solver.useVelocityBias) mSolver.SolveBias(constraints, dt);
-
-    // Joints: velocity iterations.
     for (auto& j : mConstraints) if (j->IsEnabled()) j->Prepare(dt);
-    for (auto& j : mConstraints) if (j->IsEnabled()) j->WarmStart();
-    for (u32 iter = 0; iter < mSettings.solver.velocityIterations; ++iter) {
-        for (auto& j : mConstraints) if (j->IsEnabled()) j->SolveVelocity(dt);
+
+    // 2. Partition the contacts and joints into independent islands.
+    BuildIslands();
+
+    // 3. Solve each island. Islands share no dynamic bodies, so they can run
+    //    in parallel; static bodies are never written to (see ApplyImpulsePair).
+    const u32 numIslands = u32(mIslands.Size());
+    if (mSettings.useMultithreading && JobSystem::IsInitialized() && numIslands > 1) {
+        struct Context { PhysicsWorld* world; Real dt; };
+        Context ctx{ this, dt };
+        JobSystem::Get().ParallelFor(0, numIslands, 1,
+            [](void* data, u32 index) {
+                Context* c = static_cast<Context*>(data);
+                c->world->SolveIsland(index, c->dt);
+            }, &ctx);
+    } else {
+        for (u32 i = 0; i < numIslands; ++i) SolveIsland(i, dt);
     }
 
     // Store impulses back into the cache for the next frame.
@@ -513,6 +577,176 @@ void PhysicsWorld::SolveContacts(Real dt) {
             entry.normalImpulse[p] = c.points[p].normalImpulse;
             entry.tangentImpulse1[p] = c.points[p].tangentImpulse1;
             entry.tangentImpulse2[p] = c.points[p].tangentImpulse2;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Island partition
+// ---------------------------------------------------------------------------
+void PhysicsWorld::BuildIslands() {
+    mIslands.Clear();
+
+    const auto& activeList = mBodies.GetActiveBodyList();
+    const u32 n = u32(activeList.Size());
+
+    // Give every active dynamic body a compact island-space index; everything
+    // else is marked invalid so it never participates in a union.
+    u32 numDyn = 0;
+    for (u32 i = 0; i < n; ++i) {
+        Body* body = mBodies.GetBody(activeList[i]);
+        if (!body) continue;
+        if (body->IsDynamic()) {
+            body->SetIslandIndex(numDyn++);
+        } else {
+            body->SetIslandIndex(0xFFFFFFFFu);
+        }
+    }
+
+    if (numDyn == 0) {
+        mStats.numIslands = 0;
+        return;
+    }
+
+    UnionFind uf;
+    uf.Init(numDyn);
+
+    for (const ContactConstraint& c : mContactConstraints) {
+        if (!c.bodyA || !c.bodyB) continue;
+        if (!c.bodyA->IsDynamic() || !c.bodyB->IsDynamic()) continue;
+        u32 ia = c.bodyA->GetIslandIndex();
+        u32 ib = c.bodyB->GetIslandIndex();
+        if (ia < numDyn && ib < numDyn) uf.Union(ia, ib);
+    }
+    for (u32 ji = 0; ji < u32(mConstraints.size()); ++ji) {
+        Constraint* j = mConstraints[ji].get();
+        if (!j->IsEnabled()) continue;
+        Body* a = j->GetBodyA();
+        Body* b = j->GetBodyB();
+        if (!a || !b || !a->IsDynamic() || !b->IsDynamic()) continue;
+        u32 ia = a->GetIslandIndex();
+        u32 ib = b->GetIslandIndex();
+        if (ia < numDyn && ib < numDyn) uf.Union(ia, ib);
+    }
+
+    Vector<u32> rootToIsland;
+    rootToIsland.Resize(numDyn);
+    for (u32 i = 0; i < numDyn; ++i) rootToIsland[i] = 0xFFFFFFFFu;
+    u32 numIslands = 0;
+    for (u32 i = 0; i < numDyn; ++i) {
+        u32 root = uf.Find(i);
+        if (rootToIsland[root] == 0xFFFFFFFFu) rootToIsland[root] = numIslands++;
+    }
+    mIslands.Resize(numIslands);
+
+    auto islandOf = [&](Body* body) -> u32 {
+        if (!body || !body->IsDynamic()) return 0xFFFFFFFFu;
+        u32 idx = body->GetIslandIndex();
+        if (idx >= numDyn) return 0xFFFFFFFFu;
+        return rootToIsland[uf.Find(idx)];
+    };
+
+    for (u32 ci = 0; ci < mContactConstraints.Size(); ++ci) {
+        ContactConstraint& c = mContactConstraints[ci];
+        u32 island = islandOf(c.bodyA);
+        if (island == 0xFFFFFFFFu) island = islandOf(c.bodyB);
+        if (island != 0xFFFFFFFFu) mIslands[island].contacts.PushBack(ci);
+    }
+    for (u32 ji = 0; ji < u32(mConstraints.size()); ++ji) {
+        Constraint* j = mConstraints[ji].get();
+        if (!j->IsEnabled()) continue;
+        u32 island = islandOf(j->GetBodyA());
+        if (island == 0xFFFFFFFFu) island = islandOf(j->GetBodyB());
+        if (island != 0xFFFFFFFFu) mIslands[island].joints.PushBack(ji);
+    }
+
+    mStats.numIslands = numIslands;
+}
+
+void PhysicsWorld::SolveIsland(u32 islandIndex, Real dt) {
+    const Island& island = mIslands[islandIndex];
+    const u32 nc = u32(island.contacts.Size());
+    const u32 nj = u32(island.joints.Size());
+    if (nc == 0 && nj == 0) return;
+
+    // Warm start.
+    for (u32 i = 0; i < nc; ++i) mSolver.WarmStart(mContactConstraints[island.contacts[i]]);
+    for (u32 i = 0; i < nj; ++i) mConstraints[island.joints[i]]->WarmStart();
+
+    // Contact velocity iterations.
+    if (mSettings.solver.useSIMDSolver) {
+        // Group contact points into batches of up to four with disjoint bodies,
+        // then solve each batch four-wide with SSE.
+        struct Batch {
+            ContactSolver::ContactPointRef refs[4];
+            Body* a[4];
+            Body* b[4];
+            u32 count;
+        };
+        Vector<Batch> batches;
+        batches.Reserve(nc);
+        for (u32 i = 0; i < nc; ++i) {
+            ContactConstraint& c = mContactConstraints[island.contacts[i]];
+            if (!c.bodyA || !c.bodyB || c.isSensor) continue;
+            for (u32 p = 0; p < c.numPoints; ++p) {
+                bool placed = false;
+                for (u32 bi = 0; bi < u32(batches.Size()) && !placed; ++bi) {
+                    Batch& b = batches[bi];
+                    if (b.count >= 4) continue;
+                    bool conflict = false;
+                    for (u32 k = 0; k < b.count; ++k) {
+                        if (b.a[k] == c.bodyA || b.a[k] == c.bodyB ||
+                            b.b[k] == c.bodyA || b.b[k] == c.bodyB) { conflict = true; break; }
+                    }
+                    if (conflict) continue;
+                    b.refs[b.count] = { &c, p };
+                    b.a[b.count] = c.bodyA;
+                    b.b[b.count] = c.bodyB;
+                    ++b.count;
+                    placed = true;
+                }
+                if (!placed) {
+                    Batch nb;
+                    nb.count = 1;
+                    nb.refs[0] = { &c, p };
+                    nb.a[0] = c.bodyA;
+                    nb.b[0] = c.bodyB;
+                    batches.PushBack(nb);
+                }
+            }
+        }
+        for (u32 iter = 0; iter < mSettings.solver.velocityIterations; ++iter) {
+            for (u32 bi = 0; bi < u32(batches.Size()); ++bi) {
+                mSolver.SolveVelocityBatchSIMD(batches[bi].refs, batches[bi].count, dt);
+            }
+        }
+    } else {
+        for (u32 iter = 0; iter < mSettings.solver.velocityIterations; ++iter) {
+            for (u32 i = 0; i < nc; ++i) {
+                mSolver.SolveVelocityConstraint(mContactConstraints[island.contacts[i]], dt);
+            }
+        }
+    }
+    // Joint velocity iterations.
+    for (u32 iter = 0; iter < mSettings.solver.velocityIterations; ++iter) {
+        for (u32 i = 0; i < nj; ++i) mConstraints[island.joints[i]]->SolveVelocity(dt);
+    }
+
+    // Split-impulse position correction (pseudo velocities, no energy gain).
+    if (!mSettings.solver.useVelocityBias) {
+        for (u32 iter = 0; iter < mSettings.solver.positionIterations; ++iter) {
+            for (u32 i = 0; i < nc; ++i) {
+                mSolver.SolveBiasConstraint(mContactConstraints[island.contacts[i]], dt);
+            }
+        }
+    }
+}
+
+void PhysicsWorld::SolveIslandPositions(u32 islandIndex, Real dt) {
+    const Island& island = mIslands[islandIndex];
+    for (u32 iter = 0; iter < mSettings.solver.positionIterations; ++iter) {
+        for (u32 i = 0; i < u32(island.joints.Size()); ++i) {
+            mConstraints[island.joints[i]]->SolvePosition(dt);
         }
     }
 }
@@ -555,11 +789,66 @@ void PhysicsWorld::IntegratePositions(Real dt) {
         if (!body || body->IsStatic()) continue;
 
         MotionProperties& mp = body->GetMotionProperties();
-        body->SetPosition(body->GetPosition() + mp.linearVelocity * dt);
+        Vec3 displacement = mp.linearVelocity * dt;
+        if (mSettings.useCCD && body->IsDynamic() &&
+            body->GetMotionQuality() == MotionQuality::LinearCast) {
+            ClampMotionCCD(*body, displacement);
+        }
+        body->SetPosition(body->GetPosition() + displacement);
         if (mp.angularVelocity.LengthSq() > Real(0)) {
             body->SetRotation(IntegrateRotation(body->GetRotation(), mp.angularVelocity, dt));
         }
     }
+}
+
+void PhysicsWorld::ClampMotionCCD(Body& body, Vec3& displacement) const {
+    const Real dist = displacement.Length();
+    if (dist <= mSettings.ccdMaxPenetration) return;
+    if (body.GetCCDMotionThreshold() > Real(0) && dist < body.GetCCDMotionThreshold()) return;
+    const Shape* shape = body.GetShape().Get();
+    if (!shape) return;
+
+    const Vec3 dir = displacement / dist;
+    const Transform start = body.GetTransform();
+    const u32 layer = body.GetObjectLayer();
+    const u32 mask = body.GetCollisionMask();
+
+    AABB sweep = shape->GetWorldBounds(start);
+    sweep.Encapsulate(shape->GetWorldBounds(
+        Transform(start.rotation, start.translation + displacement)));
+    sweep.Expand(Real(0.1));
+
+    Real bestFraction = Real(1);
+    Vec3 bestNormal = Vec3::UnitY();
+    bool hit = false;
+    mBroadPhase.Query(sweep, [&](u32 proxyId) {
+        const Body* other = mBodies.GetBody(BodyID::Unpack(mBroadPhase.GetUserData(proxyId)));
+        if (!other || other == &body || other->IsSensor()) return;
+        if ((other->GetObjectLayer() & mask) == 0) return;
+        if ((layer & other->GetCollisionMask()) == 0) return;
+        Real fraction;
+        Vec3 normal;
+        if (NarrowPhase::CastShape(*shape, start, dir, dist, *other->GetShape(),
+                                   other->GetTransform(), fraction, normal)) {
+            if (fraction < bestFraction) {
+                bestFraction = fraction;
+                bestNormal = normal;
+                hit = true;
+            }
+        }
+    });
+
+    if (!hit) return;
+
+    // Stop short of the surface so the next step's discrete pass can build a
+    // contact, then remove the approach velocity so we do not re-penetrate.
+    Real stop = bestFraction * dist - mSettings.ccdMaxPenetration;
+    if (stop < Real(0)) stop = Real(0);
+    displacement = dir * stop;
+
+    MotionProperties& mp = body.GetMotionProperties();
+    Real vn = mp.linearVelocity.Dot(bestNormal);
+    if (vn < Real(0)) mp.linearVelocity -= bestNormal * vn;
 }
 
 void PhysicsWorld::UpdateBodyInertias() {
@@ -781,6 +1070,45 @@ ShapeCastResult PhysicsWorld::CastShape(const Shape& shape, const Transform& sta
         result.normal = bestNormal;
     }
     return result;
+}
+
+u32 PhysicsWorld::CastShapeAll(const Shape& shape, const Transform& start, const Vec3& direction,
+                               Real maxDistance, ShapeCastResult* outHits, u32 maxHits,
+                               u32 layerMask) const {
+    Vec3 sweepDir = direction;
+    const Real dirLen = sweepDir.Length();
+    if (dirLen > math::kEpsilon) sweepDir = sweepDir / dirLen;
+    AABB sweepBounds = shape.GetWorldBounds(start);
+    sweepBounds.Encapsulate(shape.GetWorldBounds(
+        Transform(start.rotation, start.translation + sweepDir * maxDistance)));
+    sweepBounds.Expand(Real(0.1));
+
+    struct Hit { Real fraction; Vec3 normal; BodyID body; };
+    Vector<Hit> hits;
+    mBroadPhase.Query(sweepBounds, [&](u32 proxyId) {
+        const Body* body = mBodies.GetBody(BodyID::Unpack(mBroadPhase.GetUserData(proxyId)));
+        if (!body) return;
+        if ((body->GetObjectLayer() & layerMask) == 0) return;
+        Real fraction;
+        Vec3 normal;
+        if (NarrowPhase::CastShape(shape, start, direction, maxDistance,
+                                   *body->GetShape(), body->GetTransform(), fraction, normal)) {
+            hits.PushBack({ fraction, normal, body->GetID() });
+        }
+    });
+    std::sort(hits.begin(), hits.end(),
+              [](const Hit& a, const Hit& b) { return a.fraction < b.fraction; });
+
+    u32 count = 0;
+    for (const Hit& h : hits) {
+        if (count >= maxHits) break;
+        ShapeCastResult& r = outHits[count++];
+        r.hit = true;
+        r.body = h.body;
+        r.fraction = h.fraction;
+        r.normal = h.normal;
+    }
+    return count;
 }
 
 u32 PhysicsWorld::QueryAABB(const AABB& box, BodyID* outBodies, u32 maxBodies, u32 layerMask) const {

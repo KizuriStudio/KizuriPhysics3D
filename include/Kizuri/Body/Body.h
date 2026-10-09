@@ -41,6 +41,14 @@ enum class MotionType : u8 {
 };
 
 // ---------------------------------------------------------------------------
+// Motion quality - how collisions are resolved for a moving body.
+// ---------------------------------------------------------------------------
+enum class MotionQuality : u8 {
+    Discrete = 0,   // collisions resolved from the end-of-step pose
+    LinearCast      // sweep the shape and stop at the time of impact (CCD)
+};
+
+// ---------------------------------------------------------------------------
 // Activation state
 // ---------------------------------------------------------------------------
 enum class ActivationState : u8 {
@@ -56,6 +64,10 @@ struct BodySettings {
     Quat rotation = Quat::Identity();
     ShapeRef shape;
     MotionType motionType = MotionType::Dynamic;
+    MotionQuality motionQuality = MotionQuality::Discrete;
+    /// Linear-cast CCD is skipped when the body moves less than this per step
+    /// (metres). 0 = cast whenever the body is marked LinearCast.
+    Real ccdMotionThreshold = Real(0);
     Vec3 linearVelocity = Vec3::Zero();
     Vec3 angularVelocity = Vec3::Zero();
     Real friction = Real(0.5);
@@ -122,6 +134,10 @@ public:
     BodyID GetID() const { return mID; }
     MotionType GetMotionType() const { return mMotionType; }
     void SetMotionType(MotionType t) { mMotionType = t; }
+    MotionQuality GetMotionQuality() const { return mMotionQuality; }
+    void SetMotionQuality(MotionQuality q) { mMotionQuality = q; }
+    Real GetCCDMotionThreshold() const { return mCCDMotionThreshold; }
+    void SetCCDMotionThreshold(Real t) { mCCDMotionThreshold = t; }
 
     const ShapeRef& GetShape() const { return mShape; }
     void SetShape(const ShapeRef& shape) { mShape = shape; }
@@ -217,6 +233,34 @@ public:
     // --- Bounds ------------------------------------------------------------
     AABB GetWorldBounds() const { return mShape ? mShape->GetWorldBounds(mTransform) : AABB(); }
 
+    /// Snapshot the body's current state as a BodySettings (used for saving).
+    BodySettings CaptureSettings() const {
+        BodySettings s;
+        s.shape = mShape;
+        s.position = mTransform.translation;
+        s.rotation = mTransform.rotation;
+        s.linearVelocity = mMotion.linearVelocity;
+        s.angularVelocity = mMotion.angularVelocity;
+        s.motionType = mMotionType;
+        s.motionQuality = mMotionQuality;
+        s.ccdMotionThreshold = mCCDMotionThreshold;
+        s.friction = mFriction;
+        s.restitution = mRestitution;
+        s.linearDamping = mMotion.linearDamping;
+        s.angularDamping = mMotion.angularDamping;
+        s.gravityFactor = mMotion.gravityFactor;
+        s.maxLinearVelocity = mMotion.maxLinearVelocity;
+        s.maxAngularVelocity = mMotion.maxAngularVelocity;
+        s.objectLayer = mObjectLayer;
+        s.collisionMask = mCollisionMask;
+        s.allowSleeping = mAllowSleeping;
+        s.isSensor = mIsSensor;
+        s.userData = mUserData;
+        s.massOverride = IsDynamic() ? GetMass() : Real(0);
+        s.density = Real(0);
+        return s;
+    }
+
 private:
     friend class BodyManager;
 
@@ -225,6 +269,8 @@ private:
     ShapeRef mShape;
     MotionProperties mMotion;
     MotionType mMotionType = MotionType::Dynamic;
+    MotionQuality mMotionQuality = MotionQuality::Discrete;
+    Real mCCDMotionThreshold = Real(0);
     ActivationState mActivation = ActivationState::Active;
 
     Real mFriction = Real(0.5);

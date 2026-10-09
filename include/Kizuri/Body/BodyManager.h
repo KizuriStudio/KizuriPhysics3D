@@ -62,6 +62,14 @@ public:
 
     ArrayView<const BodyID> GetActiveBodyList() const { return { mActiveBodies.Data(), mActiveBodies.Size() }; }
 
+    /// Number of body slots (including empty/destroyed slots).
+    u32 GetBodySlotCount() const { return u32(mBodies.Size()); }
+    /// Body stored in a slot, or nullptr for an empty slot.
+    Body* GetBodyBySlot(u32 slot) { return slot < u32(mBodies.Size()) ? mBodies[slot] : nullptr; }
+    const Body* GetBodyBySlot(u32 slot) const {
+        return slot < u32(mBodies.Size()) ? mBodies[slot] : nullptr;
+    }
+
 private:
     void RecomputeMassProperties(Body& body, const BodySettings& settings);
 

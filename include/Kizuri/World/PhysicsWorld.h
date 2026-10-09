@@ -34,6 +34,12 @@ struct WorldSettings {
 
     /// Enable multithreaded narrow phase.
     bool useMultithreading = true;
+
+    /// Enable continuous collision detection for LinearCast bodies.
+    bool useCCD = true;
+    /// The linear cast stops this far before the surface so the next step's
+    /// discrete pass can generate a contact.
+    Real ccdMaxPenetration = Real(0.01);
 };
 
 // ---------------------------------------------------------------------------
@@ -90,6 +96,10 @@ public:
 
     // --- Body management ---------------------------------------------------
     BodyID CreateBody(const BodySettings& settings);
+    /// Remove every body, constraint and cached contact from the world.
+    void Clear();
+    /// Wake or sleep a body (adds/removes it from the active set).
+    void SetBodyActive(BodyID id, bool active);
     void DestroyBody(BodyID id);
     void DestroyAllBodies();
 
@@ -144,6 +154,11 @@ public:
                               const Vec3& direction, Real maxDistance,
                               u32 layerMask = 0xFFFFFFFFu) const;
 
+    /// Cast a convex shape and collect every hit, sorted by fraction.
+    u32 CastShapeAll(const Shape& shape, const Transform& start, const Vec3& direction,
+                     Real maxDistance, ShapeCastResult* outHits, u32 maxHits,
+                     u32 layerMask = 0xFFFFFFFFu) const;
+
     /// Find all bodies whose AABB overlaps a box.
     u32 QueryAABB(const AABB& box, BodyID* outBodies, u32 maxBodies,
                   u32 layerMask = 0xFFFFFFFFu) const;
@@ -173,8 +188,13 @@ private:
     void Collide();
     void BuildContactConstraints();
     void SolveContacts(Real dt);
+    void BuildIslands();
+    void SolveIsland(u32 islandIndex, Real dt);
+    void SolveIslandPositions(u32 islandIndex, Real dt);
     void IntegrateVelocities(Real dt);
     void IntegratePositions(Real dt);
+    /// Clamp a body's step displacement so it does not tunnel through geometry.
+    void ClampMotionCCD(Body& body, Vec3& displacement) const;
     void UpdateSleeping(Real dt);
     void UpdateBodyInertias();
 
@@ -199,6 +219,14 @@ private:
     Vector<Manifold> mManifolds;         // per broadphase pair
     Vector<u64> mManifoldKeys;           // body pair keys
     Vector<ContactConstraint> mContactConstraints;
+
+    // Island partition: contacts and joints that share no dynamic bodies are
+    // solved independently (and, when enabled, in parallel).
+    struct Island {
+        Vector<u32> contacts;   // indices into mContactConstraints
+        Vector<u32> joints;     // indices into mConstraints
+    };
+    Vector<Island> mIslands;
     Vector<CachedManifold> mCache;       // open addressing hash table
     u32 mCacheCapacity = 0;
     u32 mCacheCount = 0;

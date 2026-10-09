@@ -27,18 +27,38 @@ KZ_FORCEINLINE Real EffectiveMass(const Body* a, const Body* b, const Vec3& rA, 
     return k > math::kEpsilon ? Real(1) / k : Real(0);
 }
 
+/// Apply an impulse to the body pair. Static/kinematic bodies are skipped so
+/// that islands sharing them can be solved concurrently without data races.
+KZ_FORCEINLINE void ApplyImpulsePair(MotionProperties& ma, MotionProperties& mb,
+                                     const Vec3& rA, const Vec3& rB, const Vec3& impulse,
+                                     bool dynA, bool dynB) {
+    if (dynA) {
+        ma.linearVelocity += impulse * ma.inverseMass;
+        ma.angularVelocity += ma.inverseInertiaWorld * rA.Cross(impulse);
+    }
+    if (dynB) {
+        mb.linearVelocity -= impulse * mb.inverseMass;
+        mb.angularVelocity -= mb.inverseInertiaWorld * rB.Cross(impulse);
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
 // Prepare
 // ---------------------------------------------------------------------------
 void ContactSolver::Prepare(ArrayView<ContactConstraint> constraints, Real dt) {
-    KZ_UNUSED(dt);
     for (u32 ci = 0; ci < constraints.Size(); ++ci) {
-        ContactConstraint& c = constraints[ci];
+        PrepareConstraint(constraints[ci], dt);
+    }
+}
+
+void ContactSolver::PrepareConstraint(ContactConstraint& c, Real dt) {
         Body* A = c.bodyA;
         Body* B = c.bodyB;
-        if (!A || !B) continue;
+        if (!A || !B) return;
+        c.dynamicA = A->IsDynamic();
+        c.dynamicB = B->IsDynamic();
 
         for (u32 pi = 0; pi < c.numPoints; ++pi) {
             ContactPointConstraint& p = c.points[pi];
@@ -89,7 +109,6 @@ void ContactSolver::Prepare(ArrayView<ContactConstraint> constraints, Real dt) {
             p.tangentImpulse2 = math::Clamp(p.tangentImpulse2, -maxFriction, maxFriction);
             p.normalImpulse = math::Max(p.normalImpulse, Real(0));
         }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,10 +127,7 @@ void ContactSolver::WarmStart(ContactConstraint& c) {
                      + p.tangent2 * p.tangentImpulse2;
         impulse *= mSettings.warmStartFactor;
 
-        ma.linearVelocity += impulse * ma.inverseMass;
-        ma.angularVelocity += ma.inverseInertiaWorld * p.rA.Cross(impulse);
-        mb.linearVelocity -= impulse * mb.inverseMass;
-        mb.angularVelocity -= mb.inverseInertiaWorld * p.rB.Cross(impulse);
+        ApplyImpulsePair(ma, mb, p.rA, p.rB, impulse, c.dynamicA, c.dynamicB);
     }
 }
 
@@ -145,10 +161,7 @@ void ContactSolver::SolveContactVelocity(ContactConstraint& c, ContactPointConst
         accum = newImpulse;
 
         Vec3 impulse = tangent * lambda;
-        ma.linearVelocity += impulse * ma.inverseMass;
-        ma.angularVelocity += ma.inverseInertiaWorld * rA.Cross(impulse);
-        mb.linearVelocity -= impulse * mb.inverseMass;
-        mb.angularVelocity -= mb.inverseInertiaWorld * rB.Cross(impulse);
+        ApplyImpulsePair(ma, mb, rA, rB, impulse, c.dynamicA, c.dynamicB);
     }
 
     // --- Normal ------------------------------------------------------------
@@ -164,10 +177,7 @@ void ContactSolver::SolveContactVelocity(ContactConstraint& c, ContactPointConst
     p.normalImpulse = newImpulse;
 
     Vec3 impulse = p.normal * lambda;
-    ma.linearVelocity += impulse * ma.inverseMass;
-    ma.angularVelocity += ma.inverseInertiaWorld * rA.Cross(impulse);
-    mb.linearVelocity -= impulse * mb.inverseMass;
-    mb.angularVelocity -= mb.inverseInertiaWorld * rB.Cross(impulse);
+    ApplyImpulsePair(ma, mb, rA, rB, impulse, c.dynamicA, c.dynamicB);
 }
 
 void ContactSolver::SolveVelocityConstraint(ContactConstraint& c, Real dt) {
@@ -268,10 +278,14 @@ void ContactSolver::SolveBiasConstraint(ContactConstraint& c, Real dt) {
         p.biasImpulse = newImpulse;
 
         Vec3 impulse = p.normal * lambda;
-        ma.pseudoLinearVelocity += impulse * ma.inverseMass;
-        ma.pseudoAngularVelocity += ma.inverseInertiaWorld * rA.Cross(impulse);
-        mb.pseudoLinearVelocity -= impulse * mb.inverseMass;
-        mb.pseudoAngularVelocity -= mb.inverseInertiaWorld * rB.Cross(impulse);
+        if (c.dynamicA) {
+            ma.pseudoLinearVelocity += impulse * ma.inverseMass;
+            ma.pseudoAngularVelocity += ma.inverseInertiaWorld * rA.Cross(impulse);
+        }
+        if (c.dynamicB) {
+            mb.pseudoLinearVelocity -= impulse * mb.inverseMass;
+            mb.pseudoAngularVelocity -= mb.inverseInertiaWorld * rB.Cross(impulse);
+        }
     }
 }
 

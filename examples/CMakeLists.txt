@@ -6,6 +6,10 @@ set(KZ_EXAMPLES
     Raycast
     DebugDraw
     Benchmark
+    Character
+    Vehicle
+    SoftBody
+    CCD
 )
 
 foreach(example ${KZ_EXAMPLES})

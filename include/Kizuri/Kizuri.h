@@ -33,6 +33,18 @@
 // World
 #include "Kizuri/World/PhysicsWorld.h"
 
+// Character
+#include "Kizuri/Character/CharacterController.h"
+
+// Vehicle
+#include "Kizuri/Vehicle/Vehicle.h"
+
+// Soft body
+#include "Kizuri/SoftBody/SoftBody.h"
+
+// Serialization
+#include "Kizuri/Serialization/Serializer.h"
+
 #define KIZURI_PHYSICS_VERSION_MAJOR 0
 #define KIZURI_PHYSICS_VERSION_MINOR 1
 #define KIZURI_PHYSICS_VERSION_PATCH 0
